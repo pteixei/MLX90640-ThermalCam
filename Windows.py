@@ -214,13 +214,20 @@ class Configs():
     # Palette
     minimum_temperature = 0.0
     maximum_temperature = 100.0
+    temperature_delta = 100.0
+    max_min_set = False               #if True then get min/max from frame
     color_range = COLORS_RANGE
-    
-    
     
     def store(self):
         # serialize config data and store in sd card
         pass
+    
+    def set_palette(self, maximum=0.0, minimum=100.0, calculate=True):
+        """Sets the temperatures for color palette"""
+        self.minimum_temperature = maximum
+        self.maximum_temperature = minimum
+        self.temperature_delta = maximum - minimum
+        self.calculate_colors = calculate
 
 # --Bar-----------------------------------------------------------------------------------------> 
 class BarWindow():
@@ -401,7 +408,10 @@ class StripWindow():
     def render_strip(self, configs=None, x_offset=0, y_offset=0):
         """Renders color temperature scale (heat palette)"""
         
-        self.maximum, self.minimum = self.payload.temperatures[2], self.payload.temperatures[3]
+        # Palette Modes (0= min/max input, 1=min/max from frame
+        if self.payload.configs.max_min_set:
+            self.maximum, self.minimum = self.payload.temperatures[2], self.payload.temperatures[3]
+        
         self.display.set_buffer('strip')
         
         for block in range(2):
@@ -516,14 +526,6 @@ class FrameWindow():
         else:
             raise Exception("Buffer in use by other process.")
         return pix                   
-    
-    def set_palette(self, maximum=0.0, minimum=100.0, calculate=True):
-        """Sets the palette"""
-
-        self.maximum = maximum
-        self.minimum = minimum
-        self.delta = maximum - minimum
-        self._colors = calculate
 
     def get_color(self, value, type=0):
         """ Heatmap: returns an RGB565 color representing value"""

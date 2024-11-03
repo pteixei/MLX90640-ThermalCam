@@ -63,19 +63,19 @@ def core1_thread():
                 options (menu, views, values)
                 actions (frame, bar, configs, warnings, storage)
     """
-    def DataHandler():
+    def StartupData():
         global Payload
         conf = Payload.configs
         conf.minimum_temperature = 25
         conf.maximum_temperature = 35
         conf.interpolate_pixels = False
-        conf.calculate_colors = True
-        
+        conf.calculate_colors = False
+        conf.max_min_set = True
         
     # Core 1 starts here
     
-    # Initialize settings 
-    DataHandler()
+    # initialize settings 
+    StartupData()
     
     # launch screen
     screen = Screen()
