@@ -986,5 +986,3 @@ if __name__=='__main__':
                             asciiart = "Z"
                         print(asciiart, end="")
                 print()
-
-                

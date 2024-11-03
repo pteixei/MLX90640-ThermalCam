@@ -17,20 +17,36 @@ Implementation Notes
 **Software and Dependencies:**
 
 TODO LIST:
+        
+- Windows:
+    - InputHandler
+        - Build all:
+            Get touch > Do action
+    - FrameWindow
+        - loops need some tuneup
+        - Zoom
+        - Show/Hide Cursor
+        - Print Temperatures
+    - Bar
+        - Field Class with its methods
+    
 
-- optimize performance:
-    - loops need some tuneup
+- Payload:
 
-- create a method to manage configs:
-    - aggregate all configs into coeherent dataset (storable in flash)
+    - Need methods to manipulate data
+    
+        - create methods to manage configs:
+            - all configs in a coeherent dataset - a class (storable in flash)
 
-- create a method to manage status and content:
-    - create dict with keys: name, status, values, types, data, positions, colors,... organized into pages, lines, columns
-    - aggregate data from all sources (statistics, configs, pico, status)
-    - encode mode (show/read), x/y position, navigation (next element)
-    - sets a state-machine in main loop for navigation and function runing ( eg, save pic to flash, change mode, etc..)
+        - create methods to manage status and content:
+            - dict with: name, status, values, types, data, positions, colors,... organized into pages, lines, columns
+            - aggregate data from all sources (statistics, configs, pico, status)
+            - encode mode (show/read), x/y position, navigation (next element)
+            - sets a state-machine in main loop for navigation and function runing ( eg, save pic to flash, change mode, etc..)
+        
+        - Create Generator that yelds content pages
 
-- Create Systems class with:
+- Systems class with:
     - SD card read/write/list
     - Pico Temperature and Voltage
     - Pico RTC
