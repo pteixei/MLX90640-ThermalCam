@@ -49,18 +49,10 @@ TODO LIST:
 
     - New display functions (sleep/wake, rotation,...)
 
-    - New buffer/block types
-        - for fields in Bar (96 x 48 = 4608) 
-        - for strip (192 x 32 = 6144)
-        - Standard blocks (96x96 = 9216) only used in frame
     - change:
         - Bar Render, set_buffer(in Display)
             - Make Bar_render parser more generic and efficient (interpret list of graphical and data source primitives)
-            - Make multi-column Bar renderer.
 
-        - Strip Render
-            - Make Sstrip Render multi-block
-            - Print Min/Max temperatures in scale
         - Frame Render
             - Improve performance
             - Print cursor and spot temperature in frame    
@@ -372,13 +364,13 @@ class Display(framebuf.FrameBuffer):
             # average readings
             for i in range(0,3):
                 self.spi.write(bytearray([0XD0]))
-                Read_date = self.spi.read(2)
+                Read_data = self.spi.read(2)
                 time.sleep_us(10)
-                i_point += (((Read_date[0]<<8)+Read_date[1])>>3)
+                i_point += (((Read_data[0]<<8)+Read_data[1])>>3)
                 
                 self.spi.write(bytearray([0X90]))
-                Read_date = self.spi.read(2)
-                j_point += (((Read_date[0]<<8)+Read_date[1])>>3)
+                Read_data = self.spi.read(2)
+                j_point += (((Read_data[0]<<8)+Read_data[1])>>3)
 
             i_point=i_point/3
             j_point=j_point/3
@@ -388,8 +380,8 @@ class Display(framebuf.FrameBuffer):
             self.spi = SPI(1,60_000_000,sck=Pin(LCD_SCK),mosi=Pin(LCD_MOSI),miso=Pin(LCD_MISO))
 
             # convert to LCD (480x320) coordinates
-            X_Point = int((j_point-430)*480/3270)
-            Y_Point = 320-int((i_point-430)*320/3270)
+            X_Point = int((j_point-430)*48/327)
+            Y_Point = 320-int((i_point-430)*32/327)
             # and clean them
             X_Point = max(0, min(X_Point, 479))
             Y_Point = max(0, min(Y_Point, 319))

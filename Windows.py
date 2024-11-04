@@ -43,9 +43,8 @@ TODOS:
 ERRORS:
 
 """
-    
 from Display import Display
-from Sensor import lock, running
+from Sensor import lock, running, frame
 import time
 import gc
 from Context import content, CONTENT_PAGES
@@ -83,6 +82,7 @@ BLOCK_STEP = const(96)
 STRIP_STEP = const(32)
 TEXT_STEP = const(24)
 FIELD_STEP = const(2*TEXT_STEP)
+ZONE_SIZE = const(BLOCK_STEP//3)
 
 FRAME_BLOCK_WIDTH = const(BLOCK_STEP)
 FRAME_BLOCK_HEIGHT = const(BLOCK_STEP)
@@ -99,15 +99,15 @@ STRIP_WINDOW_WIDTH = const(2 * STRIP_BLOCK_WIDTH)
 STRIP_WINDOW_HEIGHT = const(STRIP_BLOCK_HEIGHT)
 
 SOURCE_SIZE = const(768)
-
+WINDOWS = 3
 Window_shapes = {
-            'Frame':
+            'frame':
                 {'size': (FRAME_WINDOW_WIDTH, FRAME_WINDOW_HEIGHT),
                  'place':(0, 0)},
-            'Bar':
+            'bar':
                 {'size': (BAR_WINDOW_WIDTH, BAR_WINDOW_HEIGHT),
                  'place':(FRAME_WINDOW_WIDTH, 0)},
-            'Strip':
+            'strip':
                 {'size': (STRIP_WINDOW_WIDTH, STRIP_WINDOW_HEIGHT),
                  'place':(0, FRAME_WINDOW_HEIGHT)}
             }
@@ -132,9 +132,10 @@ colors = ((1, 1, 1), (4, 4, 4), (21, 9, 5), (39, 15, 6), (57, 21, 7), (75, 26, 9
 
 COLORS_RANGE = const(26)
 
-# Global Flags
+# Global flags
 lock = False
 running = True
+
 
 # classes
 
@@ -144,11 +145,11 @@ class Lock:
 
     def acquire(self, timeout=0):
         """
-        Tries to acquire the lock in the specified time).
+            Tries to acquire the lock in the specified time).
 
-        :param timeout: Maximum time (in seconds) to try to get the lock.
-                        If timeout=0, tries to get immediately.
-        :return: True if lock acquired.
+            :param timeout: Maximum time (in seconds) to try to get the lock.
+                            If timeout=0, tries to get immediately.
+            :return: True if lock acquired.
         """
         start_time = time.time()
         
@@ -158,7 +159,7 @@ class Lock:
                 return True
             if timeout > 0 and (time.time() - start_time) >= timeout:
                 return False
-            # Pequena pausa para evitar uso excessivo da CPU
+            # wait to avoid excessive CPU use
             time.sleep(0.01)  # 10 ms
 
     def release(self):
@@ -166,7 +167,44 @@ class Lock:
         Liberate lock.
         """
         self._locked = False
+
+class Configs():
+    # Global Camera Configurations
+
+    def __init__(self):
+
+        # Mode
+        self.interpolate_pixels = False
+        self.calculate_colors = False
         
+        # Position
+        self.frame_x_offset = 0
+        self.frame_y_offset = 0
+        self.bar_x_offset = 0
+        self.bar_y_offset = 0
+        self.strip_x_offset = 0
+        self.strip_y_offset = 0
+        
+        # Palette
+        self.minimum_temperature = 0.0
+        self.maximum_temperature = 100.0
+        self.temperature_delta = 100.0
+        self.max_min_set = False               #if True then get min/max from frame
+        self.color_range = COLORS_RANGE
+    
+    def store(self):
+        """ Serializes config data and store it in sd card """
+        
+        ## TO DO
+        pass
+    
+    def set_palette(self, maximum=0.0, minimum=100.0, calculate=True):
+        """Sets the temperatures for color palette"""
+        
+        self.minimum_temperature = maximum
+        self.maximum_temperature = minimum
+        self.temperature_delta = maximum - minimum
+        self.calculate_colors = calculate
         
 class Payload():
     # Global Camera data registers
@@ -178,7 +216,7 @@ class Payload():
             - array of Pages:
                  - dictionary of Fields
                     - Name
-                    - Value (Text, Icon)
+                    - Value (Text)
                      other to implement
                         - Type (Text, Icon)
                         - Touch (No, Left/Middle/Right)
@@ -188,59 +226,47 @@ class Payload():
         configs:
             - object with camera's configs
     """
-    frame = []
-    content = []
-    temperatures = [0.0,0.0,0.0,0.0,0.0]
-    configs = None
-            
-class Configs():
-    # Global Camera Configurations
-    
-    # Mode
-    interpolate_pixels = False
-    calculate_colors = False
-    
-    # Position
-    frame_x_offset = 0
-    frame_y_offset = 0
-    bar_x_offset = 0
-    bar_y_offset = 0
-    strip_x_offset = 0
-    strip_y_offset = 0
-    
-    # Palette
-    minimum_temperature = 0.0
-    maximum_temperature = 100.0
-    temperature_delta = 100.0
-    max_min_set = False               #if True then get min/max from frame
-    color_range = COLORS_RANGE
-    
-    def store(self):
-        # serialize config data and store in sd card
-        pass
-    
-    def set_palette(self, maximum=0.0, minimum=100.0, calculate=True):
-        """Sets the temperatures for color palette"""
-        self.minimum_temperature = maximum
-        self.maximum_temperature = minimum
-        self.temperature_delta = maximum - minimum
-        self.calculate_colors = calculate
 
-# --Bar-----------------------------------------------------------------------------------------> 
+        
+    global frame, content, running
+    
+    def __init__(self):
+    
+        self.frame = frame
+        self.content = content
+        self.temperatures = [0.0,0.0,0.0,0.0,0.0]
+        self.configs = Configs()
+        self.running = running
+
+# Global data bus
+
+global data_bus
+data_bus = Payload()
+
+# --Bar----------------------------------------------------------------------------------------->
+
 class BarWindow():
-    def __init__(self, display, payload):
-        self.type = 'Bar'
-        self.payload = payload
-        self.content = payload.content
-        self.frame = payload.frame
-        self.temperatures = payload.temperatures
+    """ Class that builds a bar window"""
+    
+    # core methods       
+    def __init__(self, display, data):
+        self.type = 'bar'
+        self.on = True
+        self.data = data
+        self.content = data.content
+        self.frame = data.frame
+        self.temperatures = data.temperatures
         self.display = display
-        self.configs = payload.configs
+        self.configs = data.configs
         (self.column, self. line) = Window_shapes[self.type]['place']
         (self.width, self.height) = Window_shapes[self.type]['size']
         self._frame_lock = Lock()
         self.timeout = 1
-
+        self.touched_field, self.touched_zone = 0, 0
+        
+    def show(self, setting=True):
+        self.on = setting
+        
     def set(self, x_offset, y_offset):
         self.configs.bar_x_offset, self.configs.bar_y_offset = x_offset, y_offset
     
@@ -254,7 +280,8 @@ class BarWindow():
         self.render_bar()
         
     def render(self):
-        self.render_bar(self.content, self.configs.bar_x_offset, self.configs.bar_y_offset)
+        if self.on:
+            self.render_bar(self.content, self.configs.bar_x_offset, self.configs.bar_y_offset)
  
     # helper methods
     def get_temperatures(self,framebuf, index=SOURCE_SIZE):
@@ -281,7 +308,7 @@ class BarWindow():
                         
 
     def get_bar_touch(self):   # used to pick and adjust field values and icons
-        ZONE_SIZE = BLOCK_STEP/3
+        
         (touched_field, touched_zone) = (0,0)
         touch_point = self.display.get_touch()
         if touch_point != None:
@@ -354,19 +381,27 @@ class BarWindow():
 # ------------------------------------------------------------------------------------------->>
 
 class StripWindow():
-    def __init__(self, display, payload):
-        self.type = 'Strip'
-        self.payload = payload
-#        self.content = payload.content
+    """ Class that builds a strip window"""
+    
+    # core methods   
+    def __init__(self, display, data):
+        self.type = 'strip'
+        self.on = True
+        self.data = data
+#        self.content = data.content
         self.display = display
-        self.configs = payload.configs
+        self.configs = data.configs
         (self.column, self. line) = Window_shapes[self.type]['place']
         (self.width, self.height) = Window_shapes[self.type]['size']
         self.minimum = self.configs.minimum_temperature
         self.maximum = self.configs.maximum_temperature
         self.calculate_colors = self.configs.calculate_colors
+        self.touched_field, self.touched_zone = 0, 0
         
-    def set(self, x_offset, y_offset, levels, mode):
+    def show(self, setting=True):
+        self.on = setting
+    
+    def set(self, x_offset=0, y_offset=0, levels=0, mode=0):
         self.configs.strip_x_offset,
         self.configs.strip_y_offset,
         self.configs.levels,
@@ -382,7 +417,8 @@ class StripWindow():
         self.render_strip()
     
     def render(self):
-        self.render_strip(self.configs, self.configs.strip_x_offset, self.configs.strip_y_offset)
+        if self.on:
+            self.render_strip(self.configs, self.configs.strip_x_offset, self.configs.strip_y_offset)
 
     # helper methods                    
     def get_strip_touch(self):  # used to adjust the max and min strip values
@@ -392,7 +428,6 @@ class StripWindow():
             a touched object is referenced by:  (field_ID,zone), eg. (3,0)
         """
              
-        ZONE_SIZE = BLOCK_STEP/3
         (touched_field, touched_zone) = (0,0)
         touch_point = self.display.get_touch()
         if touch_point != None:
@@ -410,8 +445,8 @@ class StripWindow():
         """Renders color temperature scale (heat palette)"""
         
         # Palette Modes (False= min/max input, True=min/max from frame)
-        if self.payload.configs.max_min_set:
-            self.maximum, self.minimum = self.payload.temperatures[2], self.payload.temperatures[3]
+        if self.data.configs.max_min_set:
+            self.maximum, self.minimum = self.data.temperatures[2], self.data.temperatures[3]
         
         self.display.set_buffer('strip')
         
@@ -446,12 +481,16 @@ class StripWindow():
 # ------------------------------------------------------------------------------------------->>>
        
 class FrameWindow():
-    def __init__(self, display, payload):
-        self.type = 'Frame'
-        self.frame = payload.frame
-        self.content = payload.content
+    """ Class that builds a frame window"""
+    
+    # core methods
+    def __init__(self, display, data):
+        self.type = 'frame'
+        self.on = True
+        self.frame = data.frame
+        self.content = data.content
         self.display = display
-        self.configs = payload.configs
+        self.configs = data.configs
         (self.column, self. line) = Window_shapes[self.type]['place']
         (self.width, self.height) = Window_shapes[self.type]['size']
         self.x_offset, self.y_offset = self.configs.frame_x_offset, self.configs.frame_y_offset
@@ -462,21 +501,26 @@ class FrameWindow():
         self.interpolate_pixels =  self.configs.interpolate_pixels
         self._frame_lock = Lock()
         self.timeout = 1
+        self.x_pixel, self.y_pixel = 0, 0
         
-    def set(self, x_offset, y_offset, interpolate, calculate):
+    def show(self, setting=True):
+        self.on = setting    
+    
+    def set(self, x_offset=0, y_offset=0, interpolate=False, calculate=False):
         self.configs.frame_x_offset, self.configs.frame_y_offset, self.configs.interpolate_pixels, self.configs.calculate_colors = self.x_offset, self.y_offset, self.interpolate_pixels, self.calculate_colors = x_offset, y_offset, interpolate, calculate_colors
         
     def get(self):
-        touch = self.get_frame_touch(self.configs.interpolate_pixels)
-        if touch  != None:
-            (self.x_pixel, self.y_pixel) = touch
-        return touch
+        self.touch = self.get_frame_touch(self.configs.interpolate_pixels)
+        if self.touch  != None:
+            (self.x_pixel, self.y_pixel) = self.touch
+        return self.touch
     
     def clear(self):
         self.render_frame()
     
     def render(self):
-        self.render_frame(self.frame, self.x_offset, self.y_offset, self.interpolate_pixels)
+        if self.on:
+            self.render_frame(self.frame, self.x_offset, self.y_offset, self.interpolate_pixels)
 
     # helper methods                    
     def get_temperature(self, index, frame, interpolate=False):
@@ -616,7 +660,7 @@ class WindowManager:
         
     def set_window(self, window):
         self.current_window = window
-        self.render_window(window)
+#        self.render_window(window)
 
     def render(self):
         for window in self.windows:
@@ -635,27 +679,73 @@ class InputHandler:
 
     def check_input(self):
         # Implement input logic to get user input and switch windows
+        
+        # Define current window based on touch
+        touched_window = self.get_touched_window()
+        if touched_window:            
+            if self.window_manager.current_window is not None:
+                if touched_window != self.window_manager.current_window.type:          # change focus window
+                    self.window_manager.set_window(self.get_window(touched_window))
+                    
+                    print(self.window_manager.current_window.type)
+                    
+                else:                                                                  # keep focus window
+                    touched_field = self.window_manager.current_window.get()
+                    # do something with the touched field
+                    #    - change/keep field focus
+                    
+                    print(touched_field)
 
-        print(self.window_manager.current_window, self.window_manager.current_window.get())
-#        self.window_manager.current_window.get()
-        # ####  NEEDS NAVIGATION LOGIC !!!!
-        # based on touched object:
-        #  - define action
-        #          change (up/down) / set (middle) field, 
-        #          change (left/right) / set(middle) value,
-        #          change (last/next) page,
+                    # ####  NEEDS NAVIGATION LOGIC !!!!
+                    # based on touched object:
+                    #  - define action
+                    #          change (up/down) / set (middle) field, 
+                    #          change (left/right) / set(middle) value,
+                    #          change (last/next) page,
+    
+    
+    def get_window(self, window):
+        """ Gets the window object of from a window label"""
+        for _win in self.window_manager.windows:
+            if _win.type == window:
+                return _win
+        return None
+    
+    def get_touched_window(self):  # used to identify which window was touched
+        """ Gets the label of a touched window """
+        
+        touch_point = self.window_manager.display.get_touch()
+        
+        if touch_point != None:
+            [X_Point,Y_Point] = touch_point
+            # check touch area            
+            if Y_Point < FRAME_WINDOW_HEIGHT:
+                if X_Point < FRAME_WINDOW_WIDTH:
+                    return 'frame'
+                else:
+                    return 'bar'
+            else:
+                if X_Point < FRAME_WINDOW_WIDTH:
+                    return 'strip'
+                else:
+                    return 'bar'              
+        return ''
+
 
 # The full thing: A Thermal Camera!
 class Screen():
     """ Thermal Camera class"""
 
-    windows = [FrameWindow, BarWindow, StripWindow]     # Windows to be shown
+    win = [FrameWindow, BarWindow, StripWindow]     # Window objects to be instanced (shown)
 
     def __init__(self):
-    
+        
+        global data_bus
+        
+        self.data = data_bus
         self.display = Display()
         self.windows_manager = WindowManager(self.display)
-        self.create_windows(self.windows)
+        self.create_windows(self.win)                
         self.windows_manager.set_window(self.windows_manager.get_windows()[0])       # initial focus window
         self.input_handler = InputHandler(self.windows_manager)
 
@@ -675,7 +765,7 @@ class Screen():
         # Create and register windows in WindowsManager
         
         for win in windows:
-            self.windows_manager.add_window(win(self.display, Payload))
+            self.windows_manager.add_window(win(self.display, self.data))
 
 if __name__=='__main__':
     
@@ -689,12 +779,10 @@ if __name__=='__main__':
     for j in range(0,24):
         for i in range(0,32):
             frame[i+32*j]= i*j/6
-    
-    # stuff Payload
-    Payload.frame = frame                    
-    Payload.content = content
-    Payload.configs = Configs()
-    Payload.configs.minimum_temperature, Payload.configs.maximum_temperature = minimum_temperature, maximum_temperature
+
+    # stuff data_bus
+    data_bus = Payload()
+    data_bus.configs.minimum_temperature, data_bus.configs.maximum_temperature = minimum_temperature, maximum_temperature
     
     # launch windows
     camera = Screen()

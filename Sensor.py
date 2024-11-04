@@ -44,7 +44,8 @@ DEVICE_ADDRESS = const(0x33)
 FRAME_SIZE = const(768)
 TEMPERATURES_SIZE = const(5)                # Remove & transfer to Windows!!!!!!!!!!!!!!!!!!
 
-# Buffers 
+# Buffers
+global frame
 frame = [0] * FRAME_SIZE
 mlx90640Frame = [0] * 834                   # Move to GetFrame and use gc.collect() after usage
 
@@ -59,11 +60,11 @@ class Lock:
 
     def acquire(self, timeout=0):
         """
-        Tries to acquire the lock in the specified time).
+            Tries to acquire the lock in the specified time).
 
-        :param timeout: Maximum time (in seconds) to try to get the lock.
+                :param timeout: Maximum time (in seconds) to try to get the lock.
                         If timeout=0, tries to get immediately.
-        :return: True if lock acquired.
+                :return: True if lock acquired.
         """
         start_time = time.time()
         
@@ -73,12 +74,12 @@ class Lock:
                 return True
             if timeout > 0 and (time.time() - start_time) >= timeout:
                 return False
-            # Pequena pausa para evitar uso excessivo da CPU
+            # wait to avoid excessive CPU use
             time.sleep(0.01)  # 10 ms
 
     def release(self):
         """
-        Liberate lock.
+            Liberate lock.
         """
         self._locked = False
 

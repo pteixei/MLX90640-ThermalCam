@@ -31,7 +31,7 @@ TODO LIST:
         - Field Class with its methods
     
 
-- Payload:
+- Data:
 
     - Need methods to manipulate data
     
@@ -61,35 +61,34 @@ ERRORS:
 
 """
 
-from Context import content
-from Sensor import Sensor, RefreshRate, frame, running
-from Windows import Screen, Payload, Configs
+from Sensor import Sensor, RefreshRate
+from Windows import Screen, data_bus
 import _thread
 import time
 import gc
 
-Payload.frame = frame                    
-Payload.content = content
-Payload.configs = Configs()
 
-def core1_thread():
-    """ Core 1: GUI and Navigation
+def core0_thread():
+    """ Core 0: GUI and Navigation
         - GUI: display (ILI9488) driver and graphic tools
             - main loop, status,
                 options (menu, views, values)
                 actions (frame, bar, configs, warnings, storage)
     """
+
+    # Core 0 starts here
+
     def StartupData():
-        global Payload
-        conf = Payload.configs
-        conf.minimum_temperature = 25
-        conf.maximum_temperature = 35
-        conf.interpolate_pixels = False
-        conf.calculate_colors = False
-        conf.max_min_set = True
         
-    # Core 1 starts here
-    
+        global data_bus
+        
+        configs = data_bus.configs
+        configs.minimum_temperature = 25
+        configs.maximum_temperature = 35
+        configs.interpolate_pixels = False
+        configs.calculate_colors = False
+        configs.max_min_set = True
+            
     # initialize settings 
     StartupData()
     
@@ -97,36 +96,44 @@ def core1_thread():
     screen = Screen()
 
     # run screen
-    screen.loop(running)
+    screen.loop(data_bus.running)
 
-   # Core 1 ends here
+   # Core 0 ends here
 
-def core0_thread():
-    """ Core 0: Sensor and System
+def core1_thread():
+    """ Core 1: Sensor and System
         - Sensor: sensor (MLX9060) driver
         - System: system control and monitoring, SD card, leds, buttons
     """
-    # Core 0 starts here
-    global Payload
+    # Core 1 starts here
+  
+    global data_bus
+  
+    def setup_sensor():
+        
+        if data_bus.configs.interpolate_pixels:
+            sensor.refresh_rate = RefreshRate.REFRESH_0_5_HZ
+        else:    
+            sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
     
-   # launch sensor
+    # launch sensor
     sensor = Sensor()
     
-    if Payload.configs.interpolate_pixels:
-        sensor.refresh_rate = RefreshRate.REFRESH_0_5_HZ
-    else:    
-        sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
+    # ajust sensor
+    setup_sensor()
 
     # run sensor
-    sensor.loop(running)
+    sensor.loop(data_bus.running)
     
-    # Core 0 ends here
+    # Core 1 ends here
 
 
 # Main
-running = True
+
+data_bus.running = True
 second_thread = _thread.start_new_thread(core1_thread, ())
 time.sleep_ms(10)
 core0_thread()
-running = False
+data_bus.running = False
+
 # Main ends here
