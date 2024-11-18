@@ -42,7 +42,6 @@ I2C_SDA = const(6)
 I2C_SCL = const(7)
 DEVICE_ADDRESS = const(0x33)
 FRAME_SIZE = const(768)
-TEMPERATURES_SIZE = const(5)                # Remove & transfer to Windows!!!!!!!!!!!!!!!!!!
 
 # Buffers
 global frame
@@ -182,16 +181,17 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
             # For a MLX90640 in the open air the shift is -8 degC.
             tr = self._GetTa(mlx90640Frame) - OPENAIR_TA_SHIFT
             self._CalculateTo(mlx90640Frame, emissivity, tr, framebuf)            
+    
     def loop(self, running=True):
         while running:
 #            stamp = time.ticks_ms()            
             try:
                 gc.collect()
-                self.getFrame(frame)
+                self.getFrame()
             except ValueError:
                 continue
-#            time.sleep(0.1)
-#            print("Gets one sensor frame in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
+#            time.sleep(0.01)
+#            print("Gets one frame from sensor in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
 #            print("Sensor: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
 
     def _GetFrameData(self, frameData):
@@ -207,7 +207,6 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
         while (dataReady != 0) and (cnt < 5):
             self._I2CWriteWord(0x8000, 0x0030)
             self._I2CReadWords(0x0400, frameData, end=832)
-
             self._I2CReadWords(0x8000, statusRegister)
             dataReady = statusRegister[0] & 0x0008
             cnt += 1
@@ -872,6 +871,7 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
         #    return -2
 
     def _I2CReadWords(self, addr, buffer, *, end=None):
+        gc.collect()
         if end is None:
             remainingWords = len(buffer)
         else:
@@ -889,11 +889,13 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
             temps = [0]
             for i in range(9):
                 temps.append(temps[i]+temp*2)
-            
+
+
             for i in range(9):
                 outwords = struct.unpack(
                     ">" + "H" * temp, self.inbuf[temps[i] : temps[i+1]]
                 )
+                
                 for i, w in enumerate(outwords):
                     buffer[offset + i] = w
                 offset += temp
@@ -921,7 +923,7 @@ if __name__=='__main__':
     sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
 
     # View options
-    PRINT_TEMPERATURES = True
+    PRINT_TEMPERATURES = False
     PRINT_COLORS = False
     PRINT_ASCIIART = False
     PRINT_DATA = True
@@ -934,7 +936,7 @@ if __name__=='__main__':
     while CYCLE:
 
         if PRINT_DATA:
-            stamp = time.time()
+            stamp = time.ticks_ms()
         try:
             gc.collect()
             sensor.getFrame(frame)
@@ -948,12 +950,12 @@ if __name__=='__main__':
 
         if PRINT_DATA:
             print()
-            print("Read 1 frame in %0.2f s" % (time.time() - stamp))
+            print("Read 1 frame in %0.2f ms" % (time.ticks_ms() - stamp))
             print("Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
             print()
 
         if (PRINT_TEMPERATURES or PRINT_COLORS or PRINT_ASCIIART):
-            for h in range(HEIGHT):
+            for h in range(HEIGHT-1, -1, -1):
                 for w in range(WIDTH):
                     temperature = round(frame[h * WIDTH + w], 2)
                     if PRINT_TEMPERATURES:

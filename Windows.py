@@ -13,10 +13,10 @@ Implementation Notes
 **Software and Dependencies:**
 
 
-Windows is a simple GUI class that creates, organizes and renders windows for the MLX90640 Thermal Camera.
-Windows depends on Display and is structured around:
+Screen is a simple GUI class that creates, organizes and renders windows for the MLX90640 Thermal Camera.
+Screen depends on Display and is structured around:
     
-    - Block: a display area that can be used in mosaics to form windows. Blocks need buffers
+    - Block: a display area that can be used in mosaics to form windows. Blocks need framebuffers
         
     - Window: a group of blocks that shows content and read user input (touched objects in screen)
     
@@ -27,28 +27,35 @@ Windows depends on Display and is structured around:
         
         - Frame and Bar may overlap , needing to implement a focus mechanism
         
-        - blocks used in frame window use frame_buffer and show text and pixels
-        - blocks used in bar window use bar_buffer and show text and icons
-        - blocks used in strip window use strip_buffer and show pixels and text
+        - frame window blocks use frame_buffer and show text and pixels
+        - bar window blocks use field_buffer and show text and icons
+        - strip window blocks use field_buffer and show pixels and text
           
         - Screen is managed by WindowsManager
         - User input is managed by InputHandler
 TODOS:
     - Remake Bar renderer!
-    - Complete Strip with modes, auto min/max and temperature labels
-    - Complete Frame with cursor and temperature labels
-    - Make InputHandler logic (status, content page navigation, user inputs, actions)
-    - Touch get functions need change
+        - Make Bar_render parser more generic and efficient (interpret list of graphical and data source primitives)
 
+    - Complete Strip with modes, auto min/max and temperature labels
+    - Complete Frame with zoom, cursor and temperature labels
+        - Frame Render
+            - Improve performance
+            - Print cursor and spot temperature in frame    
+
+    - Make InputHandler logic (status, content page navigation, user inputs, actions)
+    
 ERRORS:
 
 """
-from Display import Display
+from Display import Display, DISPLAY_WIDTH, DISPLAY_HEIGHT, BLOCK_STEP, FIELD_STEP
 from Sensor import lock, running, frame
+from Data import Payload
 import time
 import gc
-from Context import content, CONTENT_PAGES
 
+# core data
+SOURCE_SIZE = const(768)
 
 # Interpolation data Kernels
 #Sigma=1
@@ -75,43 +82,37 @@ Kernel = ((P00, P01, P01, P02),                            #Sigma index 1
           (P02, P01, P01, P00))
 
 # GUI data
-DISPLAY_WIDTH = const(480)
-DISPLAY_HEIGHT = const(320)
 
-BLOCK_STEP = const(96)
-STRIP_STEP = const(32)
-TEXT_STEP = const(24)
-FIELD_STEP = const(2*TEXT_STEP)
-ZONE_SIZE = const(BLOCK_STEP//3)
+# Adjustable data:
+FRAME_STEP = const(96)      # Frame block "real" step
+COLUMNS = const(1)
 
-FRAME_BLOCK_WIDTH = const(BLOCK_STEP)
-FRAME_BLOCK_HEIGHT = const(BLOCK_STEP)
-BAR_BLOCK_WIDTH = const(BLOCK_STEP)
-BAR_BLOCK_HEIGHT = const(FIELD_STEP)
-STRIP_BLOCK_WIDTH = const(2 * BLOCK_STEP)
-STRIP_BLOCK_HEIGHT = const(STRIP_STEP)
+TEXT_STEP = FIELD_STEP // 2
+ZONE_STEP = BLOCK_STEP // 3
 
-FRAME_WINDOW_WIDTH = const(4 * FRAME_BLOCK_WIDTH)
-FRAME_WINDOW_HEIGHT = const(3 * FRAME_BLOCK_HEIGHT)
-BAR_WINDOW_WIDTH = const(5 * BAR_BLOCK_WIDTH)
-BAR_WINDOW_HEIGHT = const(4 * BAR_BLOCK_HEIGHT)
-STRIP_WINDOW_WIDTH = const(2 * STRIP_BLOCK_WIDTH)
-STRIP_WINDOW_HEIGHT = const(STRIP_BLOCK_HEIGHT)
+FRAME_BLOCK_WIDTH = FRAME_STEP
+FRAME_BLOCK_HEIGHT = FRAME_STEP
+FIELD_BLOCK_WIDTH = BLOCK_STEP
+FIELD_BLOCK_HEIGHT = FIELD_STEP
 
-SOURCE_SIZE = const(768)
-WINDOWS = 3
+FRAME_WINDOW_WIDTH = 4 * FRAME_BLOCK_WIDTH
+FRAME_WINDOW_HEIGHT = 3 * FRAME_BLOCK_HEIGHT
+BAR_WINDOW_WIDTH = COLUMNS * FIELD_BLOCK_WIDTH
+BAR_WINDOW_HEIGHT = 8 * FIELD_BLOCK_HEIGHT
+STRIP_WINDOW_WIDTH = 4 * FIELD_BLOCK_WIDTH
+STRIP_WINDOW_HEIGHT = FIELD_BLOCK_HEIGHT
+
 Window_shapes = {
             'frame':
                 {'size': (FRAME_WINDOW_WIDTH, FRAME_WINDOW_HEIGHT),
                  'place':(0, 0)},
             'bar':
                 {'size': (BAR_WINDOW_WIDTH, BAR_WINDOW_HEIGHT),
-                 'place':(FRAME_WINDOW_WIDTH, 0)},
+                 'place':(DISPLAY_WIDTH - BAR_WINDOW_WIDTH, 0)},
             'strip':
                 {'size': (STRIP_WINDOW_WIDTH, STRIP_WINDOW_HEIGHT),
-                 'place':(0, FRAME_WINDOW_HEIGHT)}
+                 'place':(0, DISPLAY_HEIGHT - STRIP_WINDOW_HEIGHT)}
             }
-
 
 # Base colors
 RED    =   const(0x07E0)
@@ -121,7 +122,7 @@ CYAN   =   const(0x07ff)
 YELLOW =   const(0xffe0)
 WHITE  =   const(0xffff)
 BLACK  =   const(0x0000)
-GRAY   =   const(0xd69a)
+GRAY   =   const(0xbdf7)
 
 # A basic range of cold to heat colors
 colors = ((1, 1, 1), (4, 4, 4), (21, 9, 5), (39, 15, 6), (57, 21, 7), (75, 26, 9),
@@ -132,20 +133,18 @@ colors = ((1, 1, 1), (4, 4, 4), (21, 9, 5), (39, 15, 6), (57, 21, 7), (75, 26, 9
 
 COLORS_RANGE = const(26)
 
-# Global flags
-lock = False
-running = True
-
+# Globals
+running = True                        # !!!!  definir melhor esta flag global: fica só no payload?
+data_bus = Payload()
 
 # classes
-
 class Lock:
     def __init__(self):
         self._locked = lock
 
     def acquire(self, timeout=0):
         """
-            Tries to acquire the lock in the specified time).
+            Tries to acquire the lock in the specified time.
 
             :param timeout: Maximum time (in seconds) to try to get the lock.
                             If timeout=0, tries to get immediately.
@@ -168,236 +167,268 @@ class Lock:
         """
         self._locked = False
 
-class Configs():
-    # Global Camera Configurations
-
-    def __init__(self):
-
-        # Mode
-        self.interpolate_pixels = False
-        self.calculate_colors = False
-        
-        # Position
-        self.frame_x_offset = 0
-        self.frame_y_offset = 0
-        self.bar_x_offset = 0
-        self.bar_y_offset = 0
-        self.strip_x_offset = 0
-        self.strip_y_offset = 0
-        
-        # Palette
-        self.minimum_temperature = 0.0
-        self.maximum_temperature = 100.0
-        self.temperature_delta = 100.0
-        self.max_min_set = False               #if True then get min/max from frame
-        self.color_range = COLORS_RANGE
-    
-    def store(self):
-        """ Serializes config data and store it in sd card """
-        
-        ## TO DO
-        pass
-    
-    def set_palette(self, maximum=0.0, minimum=100.0, calculate=True):
-        """Sets the temperatures for color palette"""
-        
-        self.minimum_temperature = maximum
-        self.maximum_temperature = minimum
-        self.temperature_delta = maximum - minimum
-        self.calculate_colors = calculate
-        
-class Payload():
-    # Global Camera data registers
-    """
-        frame:
-            - 32 x 48 temperature (float) from sensor
-            
-        content:
-            - array of Pages:
-                 - dictionary of Fields
-                    - Name
-                    - Value (Text)
-                     other to implement
-                        - Type (Text, Icon)
-                        - Touch (No, Left/Middle/Right)
-                        - Position on field (I, J)
-        temperatures:
-            - list of temperatures (Average, Center, Min, Max, Spot)
-        configs:
-            - object with camera's configs
-    """
-
-        
-    global frame, content, running
-    
-    def __init__(self):
-    
-        self.frame = frame
-        self.content = content
-        self.temperatures = [0.0,0.0,0.0,0.0,0.0]
-        self.configs = Configs()
-        self.running = running
-
-# Global data bus
-
-global data_bus
-data_bus = Payload()
-
 # --Bar----------------------------------------------------------------------------------------->
 
 class BarWindow():
-    """ Class that builds a bar window"""
+    """ Class that builds and runs a bar window """
     
     # core methods       
     def __init__(self, display, data):
         self.type = 'bar'
         self.on = True
+        self.current = False
+        self.background_color = WHITE
+        self.foreground_color = BLACK
+        self.highlight_color = BLUE        
+        self.highlighted = False   
         self.data = data
-        self.content = data.content
+        self.pages = data.pages
         self.frame = data.frame
-        self.temperatures = data.temperatures
         self.display = display
         self.configs = data.configs
-        (self.column, self. line) = Window_shapes[self.type]['place']
+        (self.column, self.line) = Window_shapes[self.type]['place']
         (self.width, self.height) = Window_shapes[self.type]['size']
+        self.x_offset, self.y_offset = self.configs.bar_x_offset, self.configs.bar_y_offset
         self._frame_lock = Lock()
         self.timeout = 1
-        self.touched_field, self.touched_zone = 0, 0
+        self.touch = None
+        self.current_page = 0
+        self.current_field = 0
+        self.current_zone = 0
+        self.columns = COLUMNS
         
     def show(self, setting=True):
         self.on = setting
         
     def set(self, x_offset, y_offset):
         self.configs.bar_x_offset, self.configs.bar_y_offset = x_offset, y_offset
-    
-    def get(self):
-        touch = self.get_bar_touch()
-        if touch != None:
-            (self.touched_field, self.touched_zone) = touch
-        return touch
+
+    def get(self, touch_coordinates):
+        self.touch = self.get_bar_touch(touch_coordinates)
+        return self.touch
 
     def clear(self):
-        self.render_bar()
+        self.clear_bar()
         
     def render(self):
         if self.on:
-            self.render_bar(self.content, self.configs.bar_x_offset, self.configs.bar_y_offset)
+            self.render_bar(self.pages, self.x_offset, self.y_offset)
  
-    # helper methods
-    def get_temperatures(self,framebuf, index=SOURCE_SIZE):
-        """ gets a list of temperatures (center, average, max, min, index)"""
-        if self._frame_lock.acquire(self.timeout):
-            try:
-                # center temperature
-                self.temperatures[0] = (framebuf[383]+framebuf[384]+framebuf[351]+framebuf[352]+framebuf[415]+framebuf[416])/6     
-                # average temperature
-                self.temperatures[1] = sum(framebuf) / SOURCE_SIZE
-                # maximum temperature
-                self.temperatures[2] = max(framebuf)
-                # minimum temperature
-                self.temperatures[3] = min(framebuf)     
-                # temperature at position
-                if index >=0 and index < SOURCE_SIZE:
-                    self.temperatures[4] = framebuf[index]
-                else:
-                    self.temperatures[4] = 0.0
-            finally:
-                self._frame_lock.release()
-        else:
-            raise Exception("Buffer in use by other process.")
-                        
-
-    def get_bar_touch(self):   # used to pick and adjust field values and icons
+    # helper methods        
+    def get_bar_touch(self, touch_coordinates):   # used to pick and adjust field values and icons
         
-        (touched_field, touched_zone) = (0,0)
-        touch_point = self.display.get_touch()
-        if touch_point != None:
-            [X_Point,Y_Point] = touch_point
+        # offset coordinates
+        (x, y) = touch_coordinates
+        x -= self.x_offset
+        y -= self.y_offset
+        
+        # check if touch area is acceptable 
+        if x > self.column:
+            self.current_field = max(0, min(y // FIELD_STEP, 7))
+            self.current_zone = max(0, min((x - self.column) // ZONE_STEP, 2))
+            return (self.current_field, self.current_zone)    # field from 0 to 7 and zone (in each field) from 0 to 2               
+    
+    def check_touch(self, page):
+        """ Executes actions based on page type and touched area"""
             
-            # check if touch area is acceptable
-            if X_Point > FRAME_WINDOW_WIDTH:
-                touched_field = Y_Point // FIELD_STEP                         # field from 0 to 6
-                touched_zone = (X_Point - FRAME_WINDOW_WIDTH)// ZONE_SIZE     # zone (in each field) from 0 to 2
-                return (touched_field, touched_zone)
-        return None
-
-    # renderers
-    def render_bar(self, content=None, x_offset=0, y_offset=1):
-        """Renders bar window text and graphic blocks to LCD."""
-        
-        self.get_temperatures(self.frame)
-
-        #########  BAR may be n (0 to 4) columns, from right to left:
-        #########  need anothe loop and content items must refer to a page
+        # if page is a menu or radiobutton, get choice
+        if page['type'] in ['menu','input']:
+            if self.current_field is not None:
+                if self.current_field > 0 and self.current_field < 6:
+                    page['fields'][page['value']-1]['value'] = False
+                    page['fields'][self.current_field-1]['value'] = True
+                    page['value'] = self.current_field
+                    
+#        elif ... for all other cases...
+            
+    def clear_bar(self, x_offset=0, y_offset=0, color=WHITE):
+        """ clear all pages """
 
         self.display.set_buffer('bar')
+        for column in range(5-self.columns,5):             ##  TEM de ser controlado: nr_of_columns é const
+            self.clear_column(column, x_offset, y_offset, color)
+            
+    def clear_column(self, column, x_offset, y_offset, color=WHITE):
+        """ clear all fields of a page """
+
+        for line in range (8):
+            self.display.set_block(x_offset + self.column + column * FIELD_BLOCK_WIDTH,
+                                   y_offset+ self.line + line * FIELD_BLOCK_HEIGHT,
+                                   FIELD_BLOCK_WIDTH,
+                                   FIELD_BLOCK_HEIGHT)
+            self.display.fill(color)
+            self.display.show_block()
+
+    def set_highlight(self, highlighted=True, color=RED):
+        self.highlighted = highlighted
+        self.highlight_color = color
+            
+    # renderers
+    def render_bar(self, pages=None, x_offset=0, y_offset=1):
+        """Renders bar window text and graphic blocks to LCD.
+
+        TO DO LIST:
+            -        
+        ERRORS:
+            - 
+        """
+
+        self.display.set_buffer('bar')
+        self.current_page = 4                                   ## current_page terá de ser atualizada...
         
-        # for all blocks        
-#        for i_block in range(CONTENT_PAGES):
-        for i_block in range(4,CONTENT_PAGES):             ###########   TEM de ser controlado: nr_of_columns????
-            for j_block in range(6):
-                field = content[i_block][j_block]
-                self.display.set_block(x_offset + i_block * BAR_BLOCK_WIDTH, y_offset + j_block * BAR_BLOCK_HEIGHT, BAR_BLOCK_WIDTH, BAR_BLOCK_HEIGHT)
-                if field:
-                    self.render_bar_block(field)
+        if pages:
+            
+            # for all blocks
+            for column in range(self.columns):             ##  self.columns te de ser atualizada de acordo com cada page
+            # bar may have 1 to n columns (pages), from right to left:
+                if pages[self.current_page]:  
+                    self.check_touch(pages[self.current_page])                    
+                    self.render_page(pages[self.current_page], column, x_offset, y_offset)
+                else:
+                    self.clear_column(column, x_offset, y_offset)
+        else:
+            self.clear_bar(x_offset, y_offset)
+
+    def render_page(self, page, column, x_offset, y_offset):
+        # column index (0-n) is from right to left
+
+        if page:
+            # render header
+            self.render_header(page, column, x_offset, y_offset)
+
+            # render fields
+            self.render_fields(page, column, x_offset, y_offset)
+        
+    
+    def render_header(self, page, column, x_offset, y_offset):
+        
+        self.display.set_block(x_offset + self.column + column * FIELD_BLOCK_WIDTH,
+                               y_offset + self.line,
+                               FIELD_BLOCK_WIDTH,
+                               FIELD_BLOCK_HEIGHT)
+
+        if page['subtitle'] in ['Message', 'Warning', 'Spot']:
+            background = BLUE
+        else:
+            background = RED
+
+        # highlight, eventually
+        if self.highlighted:
+            color_1 = background
+            color_2 = GRAY
+        else:
+            color_1 = WHITE
+            color_2 = background
+            
+        self.render_field(color_1, f"{page['title']:^12}", 0, color_2, f"{page['subtitle']:^12}", 0)
+        self.display.show_block()
+                        
+                     
+    def render_fields(self, page, column, x_offset, y_offset):
+
+########  Completar
+# 
+# text input/output fields
+# icon fields
+
+        line = 1
+        for field in page['fields']:
+            
+            self.display.set_block(x_offset + self.column + column * FIELD_BLOCK_WIDTH,
+                                   y_offset + self.line + line * FIELD_BLOCK_HEIGHT,
+                                   FIELD_BLOCK_WIDTH,
+                                   FIELD_BLOCK_HEIGHT)
+            
+            if field:
+                if field['active']:
+                    
+                    # menu field
+                    if field['type'] == 'menu':
+                        if field['value']:                        
+                            text_color = WHITE
+                            background_color = BLUE
+                        else:
+                            text_color = BLUE
+                            background_color = WHITE
+                            
+                        self.render_field(text_color, field['name'], 4, background_color)
+
+                    # temperatures output field
+                    elif field['type'] == 'temperature':
+                        if field['value'] in ['center', 'average', 'max', 'min', 'spot']:
+                            self.render_field(RED, field['name'], 10, WHITE, f"{self.data.temperatures[field['value']]:.2f}" + " C", 15)
+                        
+                    # radio button fields
+                    elif field['type'] == 'radio':
+                        if field['value']:
+                            text_color = WHITE
+                            background_color = BLUE
+                        else:
+                            text_color = BLACK
+                            background_color = GRAY
+                            
+                        self.render_field(text_color, field['name'], 10, background_color)
+
+                    # message fields
+                    elif field['type'] == 'message':
+                        self.render_field(BLUE, field['name'], 10, WHITE, field['value'], 10)          
+
+                    # dropdown menu fields
+                    elif field['type'] == 'dropdown':
+                        ####   Necessita de fazer o rendering em modo de edição (+/-/Enter)
+                        self.render_field(BLACK, field['name'], 10, GRAY, field['list'][field['value']], 10)
+
+                    # knobfields
+                    elif field['type'] == 'knob':
+                        ####   Necessita de fazer o rendering em modo de edição (+/-/Enter)
+                        self.render_field(BLACK, field['name'], 10, GRAY, f"{field['value']:.2f}", 10)
+                
                 else:
                     self.display.fill(WHITE)
-                self.display.show_block()
+            else:
+                self.display.fill(WHITE)
+            
+            line += 1            
+            self.display.show_block()
 
-    def render_field(self, field, f_color, key_1, tab_1, b_color=0, key_2="", tab_2=0):
+                    
+    def render_field(self, f_color, text_1, tab_1, b_color=0, text_2="", tab_2=0):
+            
         if b_color != 0:            
             self.display.fill(b_color)
-        self.display.text(field[key_1], tab_1, 10, f_color)
-        if key_2!="":
-            self.display.text(field[key_2], tab_2, 25, f_color)
         
-    def render_bar_block(self, field):
-        #parses content (type: text, icon, read, values: x/y position) and prints to LCD
-
-        if field:
-            for key in field.keys():
-                
-                if key == 'Title':
-                    self.render_field(field, WHITE, 'Title', 5, RED, 'Subtitle', 5)
-
-                if key in ['Notice', 'Spot']:
-                    self.render_field(field, WHITE, 'Title', 15, BLUE, 'Subtitle', 15)                   
-                
-                if key in ['Camera', 'Media', 'Mode', 'Setting']:
-                    text_color = BLACK
-                    background_color = WHITE
-                    if field[key]:
-                        background_color = GRAY
-                        text_color = WHITE
-                    
-                    self.display.fill(background_color)
-                    self.display.text(key, 15, 15, text_color)                       
-
-                if key in ['Center', 'Average', 'Max', 'Min']:
-                        self.render_field(field, BLACK, key, 15, WHITE)
-                        self.display.text(field[key], 15, 25, RED)  
+        self.display.text(text_1, tab_1, 10, f_color)
+        if text_2!="":
+            self.display.text(text_2, tab_2, 25, f_color)
                         
-                        
-# ------------------------------------------------------------------------------------------->>
+# --Strip----------------------------------------------------------------------------------------->>
 
 class StripWindow():
-    """ Class that builds a strip window"""
+    """ Class that builds and runs a strip window"""
     
     # core methods   
     def __init__(self, display, data):
         self.type = 'strip'
         self.on = True
+        self.current = False
+        self.background_color = WHITE
+        self.foreground_color = BLACK
+        self.highlight_color = BLUE        
+        self.highlighted = False        
         self.data = data
-#        self.content = data.content
+        self.pages = data.pages
         self.display = display
         self.configs = data.configs
-        (self.column, self. line) = Window_shapes[self.type]['place']
+        (self.column, self.line) = Window_shapes[self.type]['place']
         (self.width, self.height) = Window_shapes[self.type]['size']
+        self.x_offset, self.y_offset = self.configs.strip_x_offset, self.configs.strip_y_offset
         self.minimum = self.configs.minimum_temperature
         self.maximum = self.configs.maximum_temperature
         self.calculate_colors = self.configs.calculate_colors
-        self.touched_field, self.touched_zone = 0, 0
-        
+        self.current_field = 0
+        self.current_zone = 0
+        self.touch = (0, 0)
+
     def show(self, setting=True):
         self.on = setting
     
@@ -407,78 +438,120 @@ class StripWindow():
         self.configs.levels,
         self.configs.mode = x_offset, y_offset, levels, mode
     
-    def get(self):
-        touch = self.get_strip_touch()
-        if touch != None:
-            (self.touched_field, self.touched_zone) = touch
-        return touch
-
+    def get(self, touch_coordinates):
+        self.touch = self.get_strip_touch(touch_coordinates)
+        return self.touch
+    
     def clear(self):
-        self.render_strip()
+        self.clear_strip()
     
     def render(self):
         if self.on:
-            self.render_strip(self.configs, self.configs.strip_x_offset, self.configs.strip_y_offset)
+            self.render_strip(self.configs, self.x_offset, self.y_offset)
 
     # helper methods                    
-    def get_strip_touch(self):  # used to adjust the max and min strip values
+    def get_strip_touch(self, touch_coordinates):  # used to adjust the max and min strip values
         """ Gets the (field, zone) of the touched strip fields
             - a field is a window area (a rectangle with 3 zones: left, middle, right)
-            - field_IDs are numbered from left to right (0 to 5)
-            a touched object is referenced by:  (field_ID,zone), eg. (3,0)
-        """
-             
-        (touched_field, touched_zone) = (0,0)
-        touch_point = self.display.get_touch()
-        if touch_point != None:
-            [X_Point,Y_Point] = touch_point
+            - a touched object is referenced by:  (field_ID,zone_ID), eg. (3,0)
+        """   
+
+        # offset coordinates
+        (x, y) = touch_coordinates
+        x -= self.x_offset
+        y -= self.y_offset
+
+        # check if touch area is acceptable
+        if y > self.line:                      # y_point
+            self.current_field = max(0, min(x // BLOCK_STEP, 5))
+            self.current_zone = max(0, min((x % BLOCK_STEP) // ZONE_STEP, 2))
+            return (self.current_field,self.current_zone)    # field from 0 to 3 and zone (in each field) from 0 to 2               
+
+    def check_touch(self):
+        """ Executes actions based on page type and touched area
+
+            DO IT!!!
             
-            # check if touch area is acceptable
-            if Y_Point > FRAME_WINDOW_HEIGHT:
-                touched_field = X_Point // FIELD_STEP                       # field from 0 to 4
-                touched_zone = (X_Point % FIELD_STEP) // ZONE_SIZE            # zone (in each field) from 0 to 2
-                return (touched_field, touched_zone)
-        return None
+        """
+        pass            
+
+
+    def clear_strip(self, x_offset=0, y_offset=0, color=WHITE):
+
+        self.display.set_buffer('bar')
+        
+        for column in range(4):             ##  TEM de ser controlado: nr_of_columns é const
+            self.display.set_block(x_offset + self.column + column * FIELD_BLOCK_WIDTH,
+                                   y_offset + self.line ,
+                                   FIELD_BLOCK_WIDTH,
+                                   FIELD_BLOCK_HEIGHT)
+            self.display.fill(color)
+            self.display.show_block()
+            
+            
+    def set_highlight(self, highlighted=True, color=BLUE):
+        self.highlighted = highlighted
+        self.highlight_color = color
 
     # renderers
     def render_strip(self, configs=None, x_offset=0, y_offset=0):
         """Renders color temperature scale (heat palette)"""
+
+        # highlight, eventually
+        if self.highlighted:
+            color = self.highlight_color
+        else:
+            color = WHITE
+        
         
         # Palette Modes (False= min/max input, True=min/max from frame)
         if self.data.configs.max_min_set:
-            self.maximum, self.minimum = self.data.temperatures[2], self.data.temperatures[3]
+            self.maximum, self.minimum = self.data.temperatures['max'], self.data.temperatures['min']
         
         self.display.set_buffer('strip')
-        
-        for block in range(2):
-            self.display.set_block(x_offset + block * STRIP_BLOCK_WIDTH, y_offset + FRAME_WINDOW_HEIGHT, STRIP_BLOCK_WIDTH-1, STRIP_BLOCK_HEIGHT)
-            self.display.fill(WHITE)
+        self.check_touch()
+
+        for block in range(4):
+
+            self.display.set_block(x_offset + block * FIELD_BLOCK_WIDTH, y_offset + self.line, FIELD_BLOCK_WIDTH-1, FIELD_BLOCK_HEIGHT)
+            self.display.fill(color)
             if configs:
-                 self.render_strip_block(configs, block) 
+                self.render_strip_block(configs, block) 
             self.display.show_block()
   
     def render_strip_block(self, configs, block):
         """Renders strip block (temperature color scale) to LCD"""
+     ######
+        #####  Melhorar
+        #####
         
-        offset_x = const(BLOCK_STEP // 2 + 13)
-        offset_y = const(4)
+        block_color_range = configs.color_range // 6 if block == 0 or block == 3 else configs.color_range // 3 
+        offset_x = BLOCK_STEP // 2 + 12 if block == 0 else 0
+        offset_y = 6
         
-        strip_pixel_x = (STRIP_WINDOW_WIDTH - BLOCK_STEP - 20) // configs.color_range 
-        strip_pixel_y = STRIP_WINDOW_HEIGHT - 8
+        strip_pixel_x = (BLOCK_STEP * 3) // configs.color_range - 2
+        strip_pixel_y = STRIP_WINDOW_HEIGHT - 20
         
-        block_color_range = configs.color_range // 2
         # Draw pixels
-        for i in range(0, block_color_range):
-            
-            color = FrameWindow.get_color(self,i + block * block_color_range, type=1)
-            self.display.fill_rect(offset_x * (1-block)  + i*strip_pixel_x, offset_y, strip_pixel_x+1, strip_pixel_y, color)
+        for i in range(block_color_range):
+            color = FrameWindow.get_color(self, i + block * (configs.color_range // 3 - 1), type=1)
+            self.display.fill_rect(offset_x + i*strip_pixel_x, offset_y, strip_pixel_x, strip_pixel_y, color)
         
-        if block:
-            self.display.text(f"{self.maximum:.1f}" + " C", STRIP_BLOCK_WIDTH - offset_x + 2, 12, RED)
+        # highlight, eventually
+        if self.highlighted:
+            max_color = WHITE
+            min_color = BLACK
         else:
-            self.display.text(f"{self.minimum:.1f}" + " C", 5, 12, BLUE)
+            max_color = RED
+            min_color = BLUE
+        
+        # Print max/min temps
+        if block == 3:
+            self.display.text(f"{self.maximum:.1f}", BLOCK_STEP // 2 , 12, max_color)
+        elif block == 0:
+            self.display.text(f"{self.minimum:.1f}", 15, 12, min_color)
 
-# ------------------------------------------------------------------------------------------->>>
+# --Frame----------------------------------------------------------------------------------------->>>
        
 class FrameWindow():
     """ Class that builds a frame window"""
@@ -487,8 +560,14 @@ class FrameWindow():
     def __init__(self, display, data):
         self.type = 'frame'
         self.on = True
+        self.current = False
+        self.background_color = BLACK
+        self.foreground_color = WHITE
+        self.highlight_color = RED
+        self.highlighted = False
+        self.data = data
         self.frame = data.frame
-        self.content = data.content
+        self.pages = data.pages
         self.display = display
         self.configs = data.configs
         (self.column, self. line) = Window_shapes[self.type]['place']
@@ -501,32 +580,60 @@ class FrameWindow():
         self.interpolate_pixels =  self.configs.interpolate_pixels
         self._frame_lock = Lock()
         self.timeout = 1
-        self.x_pixel, self.y_pixel = 0, 0
+        self.current_x_pixel, self.current_y_pixel = 16, 12
+        self.touch = (0, 0)
+        self.pixel_size = FRAME_STEP // 16 if self.interpolate_pixels else FRAME_STEP // 8
+        self.x_pixels =  63  if self.interpolate_pixels else 31
+        self.y_pixels =  47  if self.interpolate_pixels else 23
+        self.pixels = 16 if self.interpolate_pixels else 8
+        self.spot_color = WHITE
+
         
     def show(self, setting=True):
         self.on = setting    
     
     def set(self, x_offset=0, y_offset=0, interpolate=False, calculate=False):
         self.configs.frame_x_offset, self.configs.frame_y_offset, self.configs.interpolate_pixels, self.configs.calculate_colors = self.x_offset, self.y_offset, self.interpolate_pixels, self.calculate_colors = x_offset, y_offset, interpolate, calculate_colors
-        
-    def get(self):
-        self.touch = self.get_frame_touch(self.configs.interpolate_pixels)
-        if self.touch  != None:
-            (self.x_pixel, self.y_pixel) = self.touch
+    
+    def get(self, touch_coordinates):
+        self.touch = self.get_frame_touch(touch_coordinates)
         return self.touch
     
     def clear(self):
-        self.render_frame()
+        self.clear_frame()
     
     def render(self):
         if self.on:
             self.render_frame(self.frame, self.x_offset, self.y_offset, self.interpolate_pixels)
 
-    # helper methods                    
+    # helper methods
+    
+    def get_temperatures(self,frame, index=SOURCE_SIZE):
+        """ gets a list of temperatures (center, average, max, min, spot)"""
+        if self._frame_lock.acquire(self.timeout):
+            try:
+                # center temperature
+                self.data.temperatures['center'] = (frame[383]+frame[384])/2     
+                # average temperature
+                self.data.temperatures['average'] = sum(frame) / SOURCE_SIZE
+                # maximum temperature
+                self.data.temperatures['max'] = max(frame)
+                # minimum temperature
+                self.data.temperatures['min'] = min(frame)     
+                # temperature at position
+                if index >=0 and index < SOURCE_SIZE:
+                    self.data.temperatures['spot'] = frame[index]
+                else:
+                    self.data.temperatures['spot'] = frame[self.current_x_pixel + 32 * (23-self.current_y_pixel)]
+            finally:
+                self._frame_lock.release()
+        else:
+            raise Exception("Buffer in use by other process.")
+        
     def get_temperature(self, index, frame, interpolate=False):
         """Get temperature for pixel referenced by index:
-            if not interpolate: temperature from frame[index]
-            if interpolate: temperature from Gaussian interpolation method that doubles frame in each dimension
+            if not interpolate: get temperature from frame[index]
+            if interpolate: get temperature from Gaussian interpolation method that doubles frame in each dimension
         """
         
         if not interpolate:
@@ -581,65 +688,100 @@ class FrameWindow():
             (r,g,b) = colors[ratio]
         return (r & 0xf8) << 8 | (g & 0xfc) << 3 | b >> 3
     
-    def get_frame_touch(self, interpolate=False):  # used to spot a pixel on frame
+    def get_frame_touch(self, touch_coordinates):  # used to spot a pixel on frame
         """ Gets the (col, lin) of the touched pixel """
         
-        pixel_size = 6 if interpolate else 12
+        # offset coordinates
+        (x, y) = touch_coordinates
+        x -= self.x_offset
+        y -= self.y_offset
         
-        touch_point = self.display.get_touch()
-        if touch_point != None:
-            [X_Point,Y_Point] = touch_point
-            # check if touch area is aceptable
-            if X_Point < FRAME_WINDOW_WIDTH and Y_Point < FRAME_WINDOW_HEIGHT:
-                (i, j) = (X_Point // pixel_size, Y_Point // pixel_size)
-                return (i, j)
-        return None
+        # check if touch area is aceptable
+        if (x < self.width and y < self.height):
+            self.current_x_pixel =  max(0, min(x // self.pixel_size, self.x_pixels))
+            self.current_y_pixel = max(0, min(y // self.pixel_size, self.y_pixels))
+            return (self.current_x_pixel, self.current_y_pixel)
+
+    def check_touch(self):
+        """ Executes actions based on page type and touched area """
+        
+        if self.current:
+            self.display.draw_pixel(self.x_offset + self.current_x_pixel * self.pixel_size,
+                                    self.y_offset + self.current_y_pixel * self.pixel_size,
+                                    self.pixel_size,
+                                    self.pixel_size,
+                                    self.spot_color)
+            
+    def clear_frame(self, x_offset=0, y_offset=0, color=BLACK):        
+        self.display.set_buffer('frame')        
+        for line in range(3):
+            for column in range(4):
+                self.clear_block(column, line, x_offset, y_offset, color)
+            
+    def clear_block(self, column, line, x_offset, y_offset, color):
+        """ clear all frame blocks """
+        self.display.set_block(x_offset + column * BLOCK_STEP, y_offset + line * BLOCK_STEP, BLOCK_STEP-1, BLOCK_STEP-1)
+        self.display.fill(color)
+        self.display.show_block()
+
+    def set_highlight(self, highlighted=True, color=RED):
+        self.highlighted = highlighted
+        self.highlight_color = color
 
     # renderers
-    def render_frame(self, frame, x_offset=0, y_offset=0, interpolate=False):
-        """Renders all blocks from frame window (temperature plot from sensor) to LCD"""
+    def render_frame(self, frame=None, x_offset=0, y_offset=0, interpolate=False):
+        """Renders all frame window blocks (temperature plot from sensor) to LCD"""
         
-        # for all blocks
+        # highlight, eventually
+        if self.highlighted:
+            background_color = self.highlight_color
+        else:
+            background_color = BLACK
+        
         self.display.set_buffer('frame')
-        for block_j in range(3):
-            block_y = block_j * BLOCK_STEP + y_offset
-            for block_i in range(4):                
-                block_x = block_i * BLOCK_STEP + x_offset
-                self.display.set_block(block_x, block_y, BLOCK_STEP-1, BLOCK_STEP-1)
-                if frame:
+        if frame:
+            self.get_temperatures(frame)
+
+            # for all blocks
+            for block_j in range(3):
+                block_y = block_j * FRAME_STEP + y_offset
+                for block_i in range(4):                
+                    block_x = block_i * FRAME_STEP + x_offset
+                    self.display.set_block(block_x, block_y, BLOCK_STEP-1, BLOCK_STEP-1)
                     self.render_frame_block(frame, block_i, block_j, interpolate)
-                else:
-                    self.display.fill(BLACK)
-                self.display.show_block()  
+                    self.display.show_block()
+            self.check_touch()
+
+        else:
+            self.clear_frame(x_offset, y_offset, background_color)
 
     def render_frame_block(self, frame, block_i, block_j, interpolate=False):
         """ Renders an individual block of a frame """
-        
-        pixels = 16 if interpolate else 8
+
         j_step = 64 if interpolate else 32
         j_max =  47 if interpolate else 23
-        pixel_size = BLOCK_STEP // pixels
-        j_offset = pixels * block_j
-        i_offset = pixels * block_i
+        j_offset = self.pixels * block_j
+        i_offset = self.pixels * block_i
         
         # for all pixels
-        for pixel_j in range(pixels):
-            pixel_y = pixel_j * pixel_size
+        for pixel_j in range(self.pixels):
+            pixel_y = pixel_j * self.pixel_size
             j = j_max - j_offset - pixel_j
-            for pixel_i in range(pixels):
-                pixel_x = pixel_i * pixel_size
+            for pixel_i in range(self.pixels):
+                pixel_x = pixel_i * self.pixel_size
                 i = i_offset + pixel_i
                 index = i + j * j_step
                 color = self.get_color(self.get_temperature(index, frame, interpolate))
-                self.display.fill_rect(pixel_x, pixel_y, pixel_size,pixel_size, color)
+                self.display.fill_rect(pixel_x, pixel_y, self.pixel_size,self.pixel_size, color)
 
-# ------------------------------------------------------------------------------------------->>>>
+# --Manager----------------------------------------------------------------------------------------->>>>
 
 class WindowManager:
     """ Window Management"""
     
-    def __init__(self, display):
+    def __init__(self, display, data):
         self.display = display
+        self.data = data
         self.windows = []
         self.current_window = None
 
@@ -658,8 +800,11 @@ class WindowManager:
             result = -1
         return result
         
-    def set_window(self, window):
+    def set_current_window(self, window):
+        if self.current_window is not None:
+            self.current_window.current = False
         self.current_window = window
+        self.current_window.current = True
 #        self.render_window(window)
 
     def render(self):
@@ -669,6 +814,16 @@ class WindowManager:
     def render_window(self, window):
         window.render()
         
+    def create_windows(self, windows):
+        # Create and register windows in WindowsManager
+        
+        for Win in windows:
+            Window = Win(self.display, self.data)
+            self.add_window(Window)
+#            Window.clear()
+
+# --Input----------------------------------------------------------------------------------------->>>>>
+
 # Input handling (button or touch)
 class InputHandler:
     """ Input and decision making """
@@ -679,30 +834,42 @@ class InputHandler:
 
     def check_input(self):
         # Implement input logic to get user input and switch windows
-        
-        # Define current window based on touch
-        touched_window = self.get_touched_window()
-        if touched_window:            
-            if self.window_manager.current_window is not None:
-                if touched_window != self.window_manager.current_window.type:          # change focus window
-                    self.window_manager.set_window(self.get_window(touched_window))
-                    
-                    print(self.window_manager.current_window.type)
-                    
-                else:                                                                  # keep focus window
-                    touched_field = self.window_manager.current_window.get()
-                    # do something with the touched field
-                    #    - change/keep field focus
-                    
-                    print(touched_field)
 
-                    # ####  NEEDS NAVIGATION LOGIC !!!!
-                    # based on touched object:
-                    #  - define action
-                    #          change (up/down) / set (middle) field, 
-                    #          change (left/right) / set(middle) value,
-                    #          change (last/next) page,
-    
+# Uncomment bellow to use interrupts:       
+#        self.window_manager.display.get_touch()
+        
+        # get the touched display coordinates and act upon them
+        touch_coordinates = self.window_manager.display.touch_coordinates           
+        if self.window_manager.display.touch_active and touch_coordinates is not None:
+            
+            touched_window = self.get_touched_window(touch_coordinates)
+            
+            print(touch_coordinates, touched_window)
+            
+            if self.window_manager.current_window is None:
+                self.window_manager.set_current_window(self.get_window(touched_window))
+            else:
+                if touched_window != self.window_manager.current_window.type:
+                    # change focus (new window)
+                    
+                    self.window_manager.current_window.set_highlight(False)                    
+                    self.window_manager.set_current_window(self.get_window(touched_window))
+                    self.window_manager.current_window.set_highlight(True)
+
+                    # ...
+                            
+            # check which field was touched
+            touched_field = self.window_manager.current_window.get(touch_coordinates)
+            if touched_field is not None:
+                
+                # show here the focus field!!! highlight field
+                
+                print(touched_field)
+            
+                # do something with the touched field/pixel or leave it to render functions in windows??? 
+            
+            self.window_manager.display.touch_active = False
+            self.window_manager.display.touch_coordinates = None
     
     def get_window(self, window):
         """ Gets the window object of from a window label"""
@@ -711,28 +878,20 @@ class InputHandler:
                 return _win
         return None
     
-    def get_touched_window(self):  # used to identify which window was touched
+    def get_touched_window(self, touch_coordinates):  # used to identify which window was touched
         """ Gets the label of a touched window """
-        
-        touch_point = self.window_manager.display.get_touch()
-        
-        if touch_point != None:
-            [X_Point,Y_Point] = touch_point
-            # check touch area            
-            if Y_Point < FRAME_WINDOW_HEIGHT:
-                if X_Point < FRAME_WINDOW_WIDTH:
-                    return 'frame'
-                else:
-                    return 'bar'
+        (x, y) = touch_coordinates
+        # check touch area            
+        if x < FRAME_WINDOW_WIDTH:
+            if y < FRAME_WINDOW_HEIGHT:
+                return 'frame'
             else:
-                if X_Point < FRAME_WINDOW_WIDTH:
-                    return 'strip'
-                else:
-                    return 'bar'              
-        return ''
+                return  'strip'
+        return 'bar'
 
-
+# --Screen----------------------------------------------------------------------------------------->>>>>>
 # The full thing: A Thermal Camera!
+
 class Screen():
     """ Thermal Camera class"""
 
@@ -744,9 +903,10 @@ class Screen():
         
         self.data = data_bus
         self.display = Display()
-        self.windows_manager = WindowManager(self.display)
-        self.create_windows(self.win)                
-        self.windows_manager.set_window(self.windows_manager.get_windows()[0])       # initial focus window
+        self.windows_manager = WindowManager(self.display, data_bus)
+        self.windows_manager.create_windows(self.win)                
+        self.windows_manager.set_current_window(self.windows_manager.get_windows()[0])       # initial focus window
+        self.windows_manager.current_window.clear()
         self.input_handler = InputHandler(self.windows_manager)
 
     def loop(self, running=True):
@@ -754,25 +914,37 @@ class Screen():
         
         while running:
 #            stamp = time.ticks_ms()
+            
             self.input_handler.check_input()
+            gc.collect()
             self.windows_manager.render()
             gc.collect()
-        #   time.sleep(0.1)
+
+
+            # An alternative with input handling per window render...
+            
+#             for window in self.windows_manager.windows:
+#                  self.input_handler.check_input()
+#                  gc.collect()
+#                  self.windows_manager.render_window(window)
+#                  gc.collect()
+                        
+#            time.sleep(0.5)
+
 #            print("Gets one screen rendered in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
 #            print("Screen: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
-
-    def create_windows(self, windows):
-        # Create and register windows in WindowsManager
-        
-        for win in windows:
-            self.windows_manager.add_window(win(self.display, self.data))
+            
 
 if __name__=='__main__':
     
     # setup context
     minimum_temperature = 0.0
     maximum_temperature = 100.0
-    temperatures = [23.0,24.1,23.2,26.3,24.0]
+    temperatures = {'center': 23.0,
+                             'average': 24.1,
+                             'max': 26.2,
+                             'min': 23.1,
+                             'spot': 24.0}
 
     # create a dummy frame
     frame = [0] * 768
@@ -782,7 +954,11 @@ if __name__=='__main__':
 
     # stuff data_bus
     data_bus = Payload()
-    data_bus.configs.minimum_temperature, data_bus.configs.maximum_temperature = minimum_temperature, maximum_temperature
+    data_bus.frame = frame
+    data_bus.configs.minimum_temperature = minimum_temperature
+    data_bus.configs.maximum_temperature = maximum_temperature
+#     data_bus.configs.frame_x_offset = 20
+#     data_bus.configs.frame_y_offset = 20
     
     # launch windows
     camera = Screen()

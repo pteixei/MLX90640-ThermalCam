@@ -85,6 +85,8 @@ def core0_thread():
         configs = data_bus.configs
         configs.minimum_temperature = 25
         configs.maximum_temperature = 35
+#         configs.frame_x_offset = 20
+#         configs.frame_y_offset = 20
         configs.interpolate_pixels = False
         configs.calculate_colors = False
         configs.max_min_set = True
@@ -115,6 +117,7 @@ def core1_thread():
             sensor.refresh_rate = RefreshRate.REFRESH_0_5_HZ
         else:    
             sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
+    
     
     # launch sensor
     sensor = Sensor()

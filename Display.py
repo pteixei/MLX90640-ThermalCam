@@ -1,5 +1,5 @@
 """
-`ILI9488 LCD/XPT2046 Touch`
+`ILI9488 LCD / XPT2046 Touch`
 ================================================================================
 
 Driver for the ILI9488 480 x 320 LCD / XPT2046 Touch
@@ -15,53 +15,15 @@ Implementation Notes
 **Software and Dependencies:**
 
 
-LCD Display
-    
-    - Block is a display area that can be used in mosaics
-        - 3 type of block (3 types of frambuf):
-        - Block: block_buffer:
-            - frame_buffer (96x96)used in frame: (384x288) 
-                - 4 x 3 blocks mosaic is needed for ploting frame pixels from sensor
-                - touch reading can occur for pointing position to get temperature
-            - bar_buffer (96x48) used in bar: (192x320) 
-                - 5 x 6 (rightmost) for text and icons
-                - 5 columns and 6 lines (fields)
-                - touch reading can occur for pointing navigation, value setting and picking
-            - strip_buffer (192 x 32) user in Strip block(384x32):
-                - 2 block (bottom) for pixels (temperature color scale), text and icons
-                - touch reading can occur for pointing navigation, value setting and picking
-                
-    - Window is a group of blocks
-    
-    - Screen is organized into 3 Windows:       
-        - Frame window: 4 x 3 blocks at the left side of the screen
-        - Bar window: 5 x 6 blocks at the right side of the screen
-        - Strip Window: 2 x 1 blocks in lower part of frame blocks
-        
-        - Frame and Bar may overlap , needing to implement a focus mechanism
-        
-        - blocks used in frame window have pixels and text
-        - blocks used in bar windows have text and icons
-        - blocks used in strip windows have pixels and text
-        
-
+LCD Display / Resistive Touch Sensor
+                    
 TODO LIST:
 
     - New display functions (sleep/wake, rotation,...)
 
-    - change:
-        - Bar Render, set_buffer(in Display)
-            - Make Bar_render parser more generic and efficient (interpret list of graphical and data source primitives)
-
-        - Frame Render
-            - Improve performance
-            - Print cursor and spot temperature in frame    
-
-
 ERRORS:
 
 """
-
 
 from machine import Pin,SPI,PWM
 import framebuf
@@ -69,6 +31,7 @@ import time
 import gc
 
 # Hardware data
+
 LCD_DC   = const(8)
 LCD_CS   = const(9)
 LCD_SCK  = const(10)
@@ -78,27 +41,33 @@ LCD_BL   = const(13)
 LCD_RST  = const(15)
 TP_CS    = const(16)
 TP_IRQ   = const(17)
+TOUCH_SAMPLES = 3
 
-# GUI data
+# LCD data
+
 DISPLAY_WIDTH = const(480)
 DISPLAY_HEIGHT = const(320)
 
-BLOCK_STEP = const(96)
-FIELD_STEP = const(48)
-STRIP_STEP = const(32)
+# GUI data
+
+# Adjustable data:
+H_BLOCKS = const(5)         # Horizontal blocks that fill display
+V_FIELDS = const(8)         # Vertical fields that fill display
+
+# Fixed data:
+BLOCK_STEP = const(DISPLAY_WIDTH // H_BLOCKS)
+FIELD_STEP = const(DISPLAY_HEIGHT // V_FIELDS)
 
 FRAME_BLOCK_WIDTH = const(BLOCK_STEP)
 FRAME_BLOCK_HEIGHT = const(BLOCK_STEP)
-BAR_BLOCK_WIDTH = const(BLOCK_STEP)
-BAR_BLOCK_HEIGHT = const(FIELD_STEP)
-STRIP_BLOCK_WIDTH = const(2 * BLOCK_STEP)
-STRIP_BLOCK_HEIGHT = const(STRIP_STEP)
+FIELD_BLOCK_WIDTH = const(BLOCK_STEP)
+FIELD_BLOCK_HEIGHT = const(FIELD_STEP)
 
 FRAME_BLOCK_SIZE = const(FRAME_BLOCK_WIDTH * FRAME_BLOCK_HEIGHT)
-STRIP_BLOCK_SIZE  = const(STRIP_BLOCK_WIDTH * STRIP_BLOCK_HEIGHT)
-BAR_BLOCK_SIZE  = const(BAR_BLOCK_WIDTH * BAR_BLOCK_HEIGHT)
+FIELD_BLOCK_SIZE  = const(FIELD_BLOCK_WIDTH * FIELD_BLOCK_HEIGHT)
 
 # Base colors
+
 RED    =   const(0x07E0)
 GREEN  =   const(0x001f)
 BLUE   =   const(0xf800)
@@ -106,15 +75,12 @@ CYAN   =   const(0x07ff)
 YELLOW =   const(0xffe0)
 WHITE  =   const(0xffff)
 BLACK  =   const(0x0000)
-GRAY   =   const(0xd69a)
+GRAY   =   const(0xbdf7)
 
+# Framebuffers
 
-# Buffer framebuffer
-# block_buffer = bytearray(BLOCK_SIZE*2)
-# block_s_buffer =  bytearray(STRIP_SIZE*2)
 frame_buffer = bytearray(FRAME_BLOCK_SIZE * 2)
-strip_buffer =  bytearray(STRIP_BLOCK_SIZE * 2)
-bar_buffer = bytearray(BAR_BLOCK_SIZE * 2)
+field_buffer = bytearray(FIELD_BLOCK_SIZE * 2)
 
 # classes
 
@@ -123,12 +89,29 @@ class Display(framebuf.FrameBuffer):
     def __init__(self, brightness=50):        
         
         self.current_buffer = frame_buffer
+        
         self.cs = Pin(LCD_CS,Pin.OUT)
         self.rst = Pin(LCD_RST,Pin.OUT)
         self.dc = Pin(LCD_DC,Pin.OUT)
         
         self.tp_cs =Pin(TP_CS,Pin.OUT)
         self.irq = Pin(TP_IRQ,Pin.IN)
+
+# Uncomment bellow to use interrupts:
+        self.irq.irq(trigger=Pin.IRQ_FALLING, handler=self.touch_interrupt_handler)
+    
+        # Variable to store touch coordinates
+        self.touch_coordinates = None
+        self.touch_active = False
+        
+        # Touch calibration values   (attention: x/y is switched in the touch device     
+        self.x_max, self.x_min = 2700, 1000
+        self.y_max, self.y_min = 3200, 1200
+
+        self.x_multiplier = DISPLAY_HEIGHT / (self.x_max - self.x_min)
+        self.x_add = self.x_min * -self.x_multiplier
+        self.y_multiplier =  DISPLAY_WIDTH / (self.y_max - self.y_min)
+        self.y_add = self.y_min * -self.y_multiplier
         
         self.cs(1)
         self.dc(1)
@@ -136,16 +119,16 @@ class Display(framebuf.FrameBuffer):
         self.tp_cs(1)
         self.spi = SPI(1,60_000_000,sck=Pin(LCD_SCK),mosi=Pin(LCD_MOSI),miso=Pin(LCD_MISO))
 
-        print("ILI9488 detected on SPI")
+        print("ILI9488/XPT2046 detected on SPI")
         print("LCD ID:", self.get_ili9488_ID())
                 
-        super().__init__(self.current_buffer, FRAME_BLOCK_WIDTH, FRAME_BLOCK_HEIGHT, framebuf.RGB565)
+        super().__init__(frame_buffer, FRAME_BLOCK_WIDTH, FRAME_BLOCK_HEIGHT, framebuf.RGB565)
         
         self.init_display()
         self.brightness(brightness)
 
 # start of core functions
-        
+    
     def write_cmd(self, cmd):
         self.cs(1)
         self.dc(0)
@@ -169,11 +152,12 @@ class Display(framebuf.FrameBuffer):
         return data
     
     def get_ili9488_ID(self):
-        # Check Display ID
-        self.write_cmd(0x04)       # Comando RDID para ler o identificador do ILI9488
-        time.sleep_ms(10)             # Pequeno atraso para garantir a resposta
+        """ Check Display ID """
         
-        # return 3 ID read bytes
+        self.write_cmd(0x04)                          # RDID command to read ILI9488 ID
+        time.sleep_ms(10)             
+        
+        # return ID read bytes
         return self.read_data(4) 
     
     def init_display(self):
@@ -258,18 +242,17 @@ class Display(framebuf.FrameBuffer):
 
     def set_buffer(self, buffer_type='frame'):
         """change framebuffer (frame, bar or strip bufers)"""
+        
         if buffer_type == 'frame':
             self.current_buffer = frame_buffer
-            super().__init__(self.current_buffer, FRAME_BLOCK_WIDTH, FRAME_BLOCK_HEIGHT, framebuf.RGB565)
-        elif buffer_type == 'bar':
-            self.current_buffer = bar_buffer
-            super().__init__(self.current_buffer, BAR_BLOCK_WIDTH, BAR_BLOCK_HEIGHT, framebuf.RGB565)
-        elif buffer_type == 'strip':
-            self.current_buffer = strip_buffer
-            super().__init__(self.current_buffer, STRIP_BLOCK_WIDTH, STRIP_BLOCK_HEIGHT, framebuf.RGB565)
+            width, height = FRAME_BLOCK_WIDTH, FRAME_BLOCK_HEIGHT
+        else:
+            self.current_buffer = field_buffer
+            width, height = FIELD_BLOCK_WIDTH, FIELD_BLOCK_HEIGHT
+        super().__init__(self.current_buffer, width, height, framebuf.RGB565)
 
     def set_block(self, x, y, dx, dy):
-        """sets the current window"""
+        """ sets the current display block """
         
         x1 , y1 = x+dx , y+dy
         
@@ -288,9 +271,9 @@ class Display(framebuf.FrameBuffer):
         self.write_data(y1&0xff)  # End Page (y1L)
         
     def show_block(self):
-        """Shows the current window"""
+        """ Shows the current block on LCD """
             
-        self.write_cmd(0x2C)   #Memory Write
+        self.write_cmd(0x2C)                              #Memory Write
 
         self.cs(1)
         self.dc(1)
@@ -324,8 +307,8 @@ class Display(framebuf.FrameBuffer):
             self.spi.write(bytearray_color)
         self.cs(1)
 
-    def draw_pixel(self,x,y,pixel_size_x,pixel_size_y,color):
-        """Draws a pixel (a colored rectangle) on LCD"""
+    def draw_pixel(self, x,y, pixel_size_x,pixel_size_y, color):
+        """ Draws a pixel (a colored rectangle) on LCD """
               
         bytearray_color =  bytearray([color&0xff, color>>8])       
  
@@ -350,42 +333,54 @@ class Display(framebuf.FrameBuffer):
             self.spi.write(bytearray_color)
         self.cs(1)
 
-    def get_touch(self):
-        """Gets touched X/Y"""
-        
-        if self.irq() == 0:
-            # change SPI settings to Touch sensor
-            self.spi = SPI(1,5_000_000,sck=Pin(LCD_SCK),mosi=Pin(LCD_MOSI),miso=Pin(LCD_MISO))
+    def normalize_coordinates(self, x, y):
+        """Normalize mean X,Y values to match LCD screen."""
+         
+        x = int(self.x_multiplier * x + self.x_add)
+        y = int(self.y_multiplier * y + self.y_add)
+ 
+        return y, 320 - x
+
+#    def get_touch(self):
+# Uncomment bellow to use interrupts:       
+    def touch_interrupt_handler(self, pin):
+        """Read touch coordinates."""
+
+        if self.irq.value() == 0 and not self.touch_active:  # Trigger only if no active touch
+
+            # Switch SPI settings for the touch sensor
+            original_spi = self.spi
+            self.spi = SPI(1, 5_000_000, sck=Pin(LCD_SCK), mosi=Pin(LCD_MOSI), miso=Pin(LCD_MISO))
             self.tp_cs(0)
-            
+                
             i_point = 0
             j_point = 0
-            
+                    
             # average readings
-            for i in range(0,3):
+            for _ in range(TOUCH_SAMPLES):
+                
                 self.spi.write(bytearray([0XD0]))
-                Read_data = self.spi.read(2)
+                data = self.spi.read(2)
                 time.sleep_us(10)
-                i_point += (((Read_data[0]<<8)+Read_data[1])>>3)
+                i_point += (((data[0]<<8)+data[1])>>3)
                 
                 self.spi.write(bytearray([0X90]))
-                Read_data = self.spi.read(2)
-                j_point += (((Read_data[0]<<8)+Read_data[1])>>3)
+                data = self.spi.read(2)
+                j_point += (((data[0]<<8)+data[1])>>3)
 
-            i_point=i_point/3
-            j_point=j_point/3
+            i_point = i_point//TOUCH_SAMPLES
+            j_point = j_point//TOUCH_SAMPLES
             
-            # change back SPI settings to LCD
+            # Switch back SPI settings to LCD
             self.tp_cs(1) 
-            self.spi = SPI(1,60_000_000,sck=Pin(LCD_SCK),mosi=Pin(LCD_MOSI),miso=Pin(LCD_MISO))
+            self.spi = original_spi
 
-            # convert to LCD (480x320) coordinates
-            X_Point = int((j_point-430)*48/327)
-            Y_Point = 320-int((i_point-430)*32/327)
-            # and clean them
-            X_Point = max(0, min(X_Point, 479))
-            Y_Point = max(0, min(Y_Point, 319))
-            return ([X_Point,Y_Point])
+            # convert to LCD (480x320) coordinates and store the touch coordinates 
+            x,y = self.normalize_coordinates(i_point, j_point)
+            
+            self.touch_coordinates = (max(0, min(x, 479)), max(0, min(y, 319)))      # clips coordinates
+            self.touch_active = True                                                 # Mark touch as active
+
                 
 # end of graphic functions
 
@@ -400,33 +395,59 @@ if __name__=='__main__':
     # init display
     LCD = Display()
 
+#     print("Display: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
+
     # Window flags
     frame_visible = True
-    read_touch = False
+    bar_and_strip_visible = True
+    read_touch = True
     
-    # Draw Frame
+    # Draw Frame 
     if frame_visible:        
         stamp = time.ticks_ms()
         for j in range(0,24):
             for i in range(0,32):
-                color = (i * j)*90
+                color = ((i+1) * (j+2))*90
                 LCD.draw_pixel(i*12, j*12, 12, 12, color)
-                
         print("Render frame in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
-        for j in range(0,3):
-            LCD.set_block(384,(96*j),96,97)
-            LCD.fill(WHITE)
-            LCD.text("Text: "+str(j), 10,20, RED)
-            LCD.show_block()
-        
     
-    # Test Touch        
+    # test bar & strip blocks
+    if bar_and_strip_visible:    
+        LCD.set_buffer('bar')
+        for j in range(8):
+            LCD.set_block(384,(40*j),96,40)
+            LCD.fill(WHITE)
+            LCD.text("Bar: "+str(j), 10,12, RED)
+            LCD.show_block()
+        for i in range(4):
+            LCD.set_block(96*i,288,96-1,40)
+            LCD.fill(BLUE)
+            LCD.text("Strip: "+str(i), 10,12, WHITE)
+            LCD.show_block()            
+    
+    # Test Touch
     while read_touch:
-        touch_point = LCD.get_touch()
-        if touch_point != None:
-            [X_Point,Y_Point] = touch_point            
+
+        print("Display: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
+
+# Uncomment bellow to use interrupts:           
+#         LCD.get_touch()
+        
+        if LCD.touch_coordinates is not None:
+            [X_Point,Y_Point] = LCD.touch_coordinates            
+            
+            print(LCD.touch_coordinates)
+            
             # check if touch area is aceptable
-            if X_Point > 288:
-                touched_field = Y_Point // 48
-                print(touched_field, "- field touched")
-                time.sleep_ms(50)
+            if X_Point > 384:
+                touched_field = Y_Point // 40
+                touched_zone = (X_Point-384) // 32
+                
+                print(touched_field, " - field touched", touched_zone, " - zone touched")
+                
+            time.sleep_ms(100)
+            
+            # Reset the touch_active flag and coordinates after processing
+            LCD.touch_active = False
+            LCD.touch_coordinates = None
+        gc.collect()
