@@ -18,33 +18,14 @@ Implementation Notes
 
 TODO LIST:
         
-- Windows:
-    - InputHandler
-        - Build all:
-            Get touch > Do action
-    - FrameWindow
-        - loops need some tuneup
-        - Zoom
-        - Show/Hide Cursor
-        - Print Temperatures
-    - Bar
-        - Field Class with its methods
-    
-
 - Data:
 
     - Need methods to manipulate data
     
         - create methods to manage configs:
-            - all configs in a coeherent dataset - a class (storable in flash)
-
-        - create methods to manage status and content:
-            - dict with: name, status, values, types, data, positions, colors,... organized into pages, lines, columns
-            - aggregate data from all sources (statistics, configs, pico, status)
-            - encode mode (show/read), x/y position, navigation (next element)
-            - sets a state-machine in main loop for navigation and function runing ( eg, save pic to flash, change mode, etc..)
+            - all configs need updating from page field values
         
-        - Create Generator that yelds content pages
+        - Create Generator that yelds pages
 
 - Systems class with:
     - SD card read/write/list
@@ -55,14 +36,15 @@ TODO LIST:
     - Accelerometer/Rotation
     - Sleep/Wake/Shutdown
     
-    - Use those methods in Windows
+    - Use those methods in Display and Windows
     
 ERRORS:
 
 """
 
 from Sensor import Sensor, RefreshRate
-from Windows import Screen, data_bus
+from Windows import Screen
+from Data import Payload
 import _thread
 import time
 import gc
@@ -78,10 +60,7 @@ def core0_thread():
 
     # Core 0 starts here
 
-    def StartupData():
-        
-        global data_bus
-        
+    def startup_data():        
         configs = data_bus.configs
         configs.minimum_temperature = 25
         configs.maximum_temperature = 35
@@ -89,16 +68,16 @@ def core0_thread():
 #         configs.frame_y_offset = 20
         configs.interpolate_pixels = False
         configs.calculate_colors = False
-        configs.max_min_set = True
+        configs.max_min_set = False
             
     # initialize settings 
-    StartupData()
+    startup_data()
     
     # launch screen
-    screen = Screen()
+    screen = Screen(data_bus)
 
     # run screen
-    screen.loop(data_bus.running)
+    screen.loop()
 
    # Core 0 ends here
 
@@ -112,12 +91,10 @@ def core1_thread():
     global data_bus
   
     def setup_sensor():
-        
         if data_bus.configs.interpolate_pixels:
             sensor.refresh_rate = RefreshRate.REFRESH_0_5_HZ
         else:    
             sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
-    
     
     # launch sensor
     sensor = Sensor()
@@ -126,17 +103,14 @@ def core1_thread():
     setup_sensor()
 
     # run sensor
-    sensor.loop(data_bus.running)
+    sensor.loop()
     
     # Core 1 ends here
 
-
 # Main
-
-data_bus.running = True
+data_bus = Payload()
+data_bus.sensor_running = True
 second_thread = _thread.start_new_thread(core1_thread, ())
-time.sleep_ms(10)
 core0_thread()
-data_bus.running = False
-
+data_bus.sensor_running = False
 # Main ends here

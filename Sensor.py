@@ -49,13 +49,13 @@ frame = [0] * FRAME_SIZE
 mlx90640Frame = [0] * 834                   # Move to GetFrame and use gc.collect() after usage
 
 # Flags
-global lock, running
-lock = False
-running = True
+global frame_lock, sensor_running
+frame_lock = False
+sensor_running = True
 
 class Lock:
     def __init__(self):
-        self._locked = lock
+        self._locked = frame_lock
 
     def acquire(self, timeout=0):
         """
@@ -181,18 +181,6 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
             # For a MLX90640 in the open air the shift is -8 degC.
             tr = self._GetTa(mlx90640Frame) - OPENAIR_TA_SHIFT
             self._CalculateTo(mlx90640Frame, emissivity, tr, framebuf)            
-    
-    def loop(self, running=True):
-        while running:
-#            stamp = time.ticks_ms()            
-            try:
-                gc.collect()
-                self.getFrame()
-            except ValueError:
-                continue
-#            time.sleep(0.01)
-#            print("Gets one frame from sensor in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
-#            print("Sensor: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
 
     def _GetFrameData(self, frameData):
         dataReady = 0
@@ -912,6 +900,22 @@ class Sensor:  # pylint: disable=too-many-instance-attributes
             remainingWords -= read_words
             addr += read_words
 
+    def loop(self):
+        global sensor_running
+        
+        while True:
+#            stamp = time.ticks_ms()
+            if sensor_running:
+                try:
+                    gc.collect()
+                    self.getFrame()
+                    gc.collect()
+                except ValueError:
+                    continue
+#            time.sleep(0.01)
+#            print("Gets one frame from sensor in %0.4f ms" % (time.ticks_diff(time.ticks_ms(), stamp)))        
+            print("Sensor: Used RAM:", gc.mem_alloc(), "Remaining RAM:", gc.mem_free())
+
 # End of driver code
 
 if __name__=='__main__':
@@ -922,16 +926,23 @@ if __name__=='__main__':
     sensor = Sensor()
     sensor.refresh_rate = RefreshRate.REFRESH_2_HZ
 
+
     # View options
     PRINT_TEMPERATURES = False
     PRINT_COLORS = False
     PRINT_ASCIIART = False
     PRINT_DATA = True
     CYCLE = True
+    TEST_LOOP = False
     
     WIDTH = 32
     HEIGHT = 24
-        
+    
+    # test loop. Uncomment print statements in loop()
+    sensor_running = TEST_LOOP
+    if TEST_LOOP:
+        sensor.loop()
+    
     # Main loop
     while CYCLE:
 
@@ -941,9 +952,7 @@ if __name__=='__main__':
             gc.collect()
             sensor.getFrame(frame)
             gc.collect()
-
             print("MLX9060 sensor running")
-
         except ValueError:
             print("MLX9060 sensor error")
             continue

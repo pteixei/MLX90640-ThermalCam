@@ -1,0 +1,10 @@
+
+
+
+Errors:
+
+- BAR
+	- Calibrate: page should wait for touch before going to FULL
+- FULL	
+	- Calibrate: should get a to a clean FULL screen and wait for touch before going  FRAME
+	- FRAME should be rendered
